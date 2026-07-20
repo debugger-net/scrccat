@@ -19,3 +19,15 @@ export interface Seam {
   confidence: number // 신뢰도(0~1)
   overridden: boolean // 사용자가 수동 조정했는지
 }
+
+// 실행취소/다시실행 대상이 되는 편집 상태 전체(스냅샷 단위).
+export interface Doc {
+  shots: Shot[] // 최종 표시 순서
+  top: number // 상단 고정 영역 높이
+  bottom: number // 하단 고정 영역 높이
+  seams: Seam[] // 이음새들 (shots.length - 1개)
+  includeHeader: boolean
+  includeFooter: boolean
+  cleanOverlays: boolean // 플로팅/스티키 UI 자동 정리
+  fixedTouched: boolean // 사용자가 고정 영역을 직접 건드렸는지(자동 감지 억제)
+}

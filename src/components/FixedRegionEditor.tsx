@@ -5,13 +5,15 @@ interface Props {
   first: Shot
   top: number
   bottom: number
-  onChange: (top: number, bottom: number) => void
+  onChange: (top: number, bottom: number) => void // 실시간 갱신(되돌리기 지점 없음)
+  onInteractStart?: () => void // 드래그/편집 시작 → 되돌리기 지점 확보
+  onInteractEnd?: () => void // 종료 → 되돌리기 지점 확정
 }
 
 const VIEW_W = 200
 
 // 첫 이미지 위에 상/하단 고정 영역을 드래그 핸들과 숫자 입력으로 지정한다.
-export default function FixedRegionEditor({ first, top, bottom, onChange }: Props) {
+export default function FixedRegionEditor({ first, top, bottom, onChange, onInteractStart, onInteractEnd }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [drag, setDrag] = useState<null | 'top' | 'bottom'>(null)
   const scale = VIEW_W / first.width
@@ -30,6 +32,11 @@ export default function FixedRegionEditor({ first, top, bottom, onChange }: Prop
     ctx.drawImage(first.bitmap, 0, 0, VIEW_W, viewH)
   }, [first, viewH])
 
+  const startDrag = (which: 'top' | 'bottom') => {
+    onInteractStart?.()
+    setDrag(which)
+  }
+
   useEffect(() => {
     if (!drag) return
     const move = (e: PointerEvent) => {
@@ -43,14 +50,19 @@ export default function FixedRegionEditor({ first, top, bottom, onChange }: Prop
         onChange(st.top, Math.max(0, Math.min(st.height - clamped, st.height - st.top - 10)))
       }
     }
-    const up = () => setDrag(null)
+    const up = () => {
+      setDrag(null)
+      onInteractEnd?.()
+    }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
     return () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
     }
-  }, [drag, onChange])
+  }, [drag, onChange, onInteractEnd])
 
   const topY = top * scale
   const botY = viewH - bottom * scale
@@ -67,8 +79,8 @@ export default function FixedRegionEditor({ first, top, bottom, onChange }: Prop
           className="pointer-events-none absolute left-0 w-full bg-emerald-500/25"
           style={{ top: botY, height: bottom * scale }}
         />
-        <Handle color="sky" y={topY} onDown={() => setDrag('top')} />
-        <Handle color="emerald" y={botY} onDown={() => setDrag('bottom')} />
+        <Handle color="sky" y={topY} onDown={() => startDrag('top')} />
+        <Handle color="emerald" y={botY} onDown={() => startDrag('bottom')} />
       </div>
       <div className="flex gap-3 text-xs">
         <label className="flex items-center gap-1">
@@ -77,7 +89,11 @@ export default function FixedRegionEditor({ first, top, bottom, onChange }: Prop
             type="number"
             className="input-num"
             value={top}
-            onChange={(e) => onChange(clampNum(e.target.value, 0, first.height - bottom - 10), bottom)}
+            onChange={(e) => {
+              onInteractStart?.()
+              onChange(clampNum(e.target.value, 0, first.height - bottom - 10), bottom)
+              onInteractEnd?.()
+            }}
           />
         </label>
         <label className="flex items-center gap-1">
@@ -86,7 +102,11 @@ export default function FixedRegionEditor({ first, top, bottom, onChange }: Prop
             type="number"
             className="input-num"
             value={bottom}
-            onChange={(e) => onChange(top, clampNum(e.target.value, 0, first.height - top - 10))}
+            onChange={(e) => {
+              onInteractStart?.()
+              onChange(top, clampNum(e.target.value, 0, first.height - top - 10))
+              onInteractEnd?.()
+            }}
           />
         </label>
       </div>

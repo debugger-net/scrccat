@@ -18,3 +18,6 @@ pnpm-debug.log*
 # misc
 *.local
 .DS_Store
+
+# local scratch / sample screenshots (not for publishing)
+.work-temp/
