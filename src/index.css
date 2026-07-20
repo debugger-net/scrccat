@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .btn-icon {
+    @apply flex h-6 w-6 items-center justify-center rounded text-neutral-300 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-30;
+  }
+  .btn-nudge {
+    @apply rounded bg-neutral-700 px-1.5 py-0.5 text-[11px] text-neutral-200 hover:bg-neutral-600;
+  }
+  .input-num {
+    @apply w-16 rounded border border-neutral-600 bg-neutral-800 px-1 py-0.5 text-neutral-100;
+  }
+  .section-title {
+    @apply mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+}

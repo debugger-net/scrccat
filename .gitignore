@@ -1,0 +1,20 @@
+# padenv (portable dev env) — local only
+.portable-dev/
+.devcontainer/
+.claude/skills/padenv-*
+.agents/skills/padenv-*
+
+# dependencies & build output
+node_modules/
+dist/
+dist-ssr/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# misc
+*.local
+.DS_Store
