@@ -227,7 +227,9 @@ export default function ImageList({
           return (
             <li
               key={s.id}
-              ref={(el) => (itemRefs.current[pos] = el)}
+              ref={(el) => {
+                itemRefs.current[pos] = el
+              }}
               onPointerDown={(e) => onBarPointerDown(pos, e)}
               onPointerEnter={() => !drag && onHoverShot(pos)}
               onPointerLeave={() => !drag && onHoverShot(null)}
