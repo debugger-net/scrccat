@@ -3,15 +3,17 @@ import type { Doc } from './lib/types'
 import { loadShot } from './lib/imageLoad'
 import { computeOverlay, detectFixedBands, type OverlayInfo } from './lib/overlay'
 import { detectAllSeams, reconcileSeams, clampAdvance } from './lib/stitch'
-import { orderShots, isIdentityOrder } from './lib/order'
+import { isIdentityOrder } from './lib/order'
 import { computeLayout } from './lib/compose'
 import { downloadStitched } from './lib/download'
 import { useHistory } from './hooks/useHistory'
+import { useStitchWorker } from './hooks/useStitchWorker'
 import DropZone from './components/DropZone'
 import ImageList from './components/ImageList'
 import FixedRegionEditor from './components/FixedRegionEditor'
 import SeamControls from './components/SeamControls'
 import PreviewCanvas from './components/PreviewCanvas'
+import SeamInspector from './components/SeamInspector'
 
 const EMPTY_OVERLAY: OverlayInfo = { mask: new Uint8Array(0), composeMask: new Uint8Array(0), H: 0, W: 48 }
 
@@ -31,6 +33,7 @@ const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()))
 export default function App() {
   const history = useHistory<Doc>(INITIAL)
   const doc = history.present
+  const worker = useStitchWorker()
 
   const [autoOrder, setAutoOrder] = useState(true)
   const [sortDir, setSortDir] = useState<0 | 1 | -1>(0)
@@ -66,7 +69,9 @@ export default function App() {
     setBusyLabel(label)
   }
 
-  // ---- 무거운 처리(고정영역 감지 + 자동 정렬): 취소 가능 + 재진입 금지 ----
+  // ---- 무거운 처리(고정영역 감지 + 자동 정렬): 워커 위임 · 취소 가능 · 재진입 금지 ----
+  // 정렬·이음새 계산은 워커에서(메인 비블로킹). overlay는 저렴하고 렌더용 composeMask도
+  // 필요하므로 메인에서 계산해 마스크만 워커로 넘긴다.
   async function processInto(shots: Doc['shots'], reorder: boolean, gen: number) {
     if (shots.length < 2) {
       history.update((d) => ({ ...d, shots, seams: [] }))
@@ -82,21 +87,16 @@ export default function App() {
       top = fb.top
       bottom = fb.bottom
     }
-    let ordered = shots
-    let reordered = false
-    if (reorder) {
-      const order = orderShots(shots, ov.mask, top, bottom)
-      reordered = !isIdentityOrder(order)
-      ordered = order.map((i) => shots[i])
-    }
+    const { order, seams } = await worker.process({ shots, mask: ov.mask, top, bottom, reorder })
     if (jobGen.current !== gen) return
-    const seams = detectAllSeams(ordered, ov.mask, top, bottom)
+    const ordered = order.map((i) => shots[i])
+    const reordered = reorder && !isIdentityOrder(order)
     history.update((d) => ({ ...d, shots: ordered, top, bottom, seams }))
     return reordered
   }
 
   const addFiles = useCallback(
-    async (files: File[]) => {
+    async (files: File[], insertAt?: number) => {
       if (runningRef.current) {
         notify('처리 중입니다. 잠시 후 다시 시도하세요.')
         return
@@ -108,14 +108,22 @@ export default function App() {
       try {
         const loaded = await Promise.all(files.map(loadShot))
         if (jobGen.current !== gen) return
-        const merged = [...history.ref.current.shots, ...loaded]
+        const cur = history.ref.current.shots
+        const positioned = insertAt != null
+        const at = positioned ? Math.max(0, Math.min(insertAt, cur.length)) : cur.length
+        const merged = [...cur.slice(0, at), ...loaded, ...cur.slice(at)]
         history.update((d) => ({ ...d, shots: merged }))
         setBusyState(true, '순서·고정영역 분석 중…')
         await raf()
         if (jobGen.current !== gen) return
-        await processInto(merged, autoOrderRef.current, gen)
+        // 위치를 지정해 넣은 경우엔 수동 배치를 존중해 자동 정렬을 건너뛴다.
+        const reordered = await processInto(merged, positioned ? false : autoOrderRef.current, gen)
         history.endTx(base)
-        notify(`${loaded.length}장 추가${autoOrderRef.current && merged.length >= 2 ? ' · 순서 자동 정렬' : ''}`)
+        notify(
+          positioned
+            ? `${loaded.length}장을 ${at + 1}번 위치에 추가`
+            : `${loaded.length}장 추가${reordered ? ' · 순서 자동 정렬' : ''}`,
+        )
       } catch {
         history.endTx(base)
         notify('이미지를 불러오지 못했습니다.')
@@ -193,8 +201,9 @@ export default function App() {
             fixedTouched: shots.length ? d.fixedTouched : false,
           }
         }
+        // 변경된 경계(삭제로 새로 인접해진 쌍)만 재감지하고 나머지 이음새는 재사용 → 즉시 삭제.
         const mask = computeOverlay(shots).mask
-        const seams = detectAllSeams(shots, mask, d.top, d.bottom, d.seams)
+        const seams = reconcileSeams(shots, d.shots, d.seams, mask, d.top, d.bottom)
         return { ...d, shots, seams }
       })
       notify('이미지를 삭제했습니다.')
@@ -205,9 +214,12 @@ export default function App() {
   const clearAll = useCallback(() => {
     setSelectedSeam(null)
     setSortDir(0)
+    jobGen.current++ // 진행 중인 워커 결과 취소(지운 뒤 다시 채워지지 않게)
+    const ids = history.ref.current.shots.map((s) => s.id)
     history.commit(() => ({ ...INITIAL }))
+    if (ids.length) worker.evict(ids)
     notify('모두 지웠습니다.')
-  }, [history, notify])
+  }, [history, notify, worker])
 
   // ---- 고정 영역 편집 ----
   const onFixedStart = useCallback(() => {
@@ -250,6 +262,71 @@ export default function App() {
       }))
     },
     [history],
+  )
+
+  // ---- WYSIWYG 이음새 편집(미리보기/인스펙터에서 드래그): 시작 시 되돌리기 지점 확보 ----
+  const seamTxBase = useRef<Doc | null>(null)
+  const onSeamEditStart = useCallback(() => {
+    if (!seamTxBase.current) seamTxBase.current = history.beginTx()
+  }, [history])
+  const onSeamEditEnd = useCallback(() => {
+    if (seamTxBase.current) {
+      history.endTx(seamTxBase.current)
+      seamTxBase.current = null
+    }
+  }, [history])
+  const setSeamAdvance = useCallback(
+    (i: number, advance: number) => {
+      history.update((d) => ({
+        ...d,
+        seams: d.seams.map((s, k) =>
+          k === i ? { ...s, advance: clampAdvance(Math.round(advance), d.shots[i + 1], d.top, d.bottom), overridden: true } : s,
+        ),
+      }))
+      setSelectedSeam(i)
+    },
+    [history],
+  )
+  const setSeamCut = useCallback(
+    (i: number, cut: number) => {
+      history.update((d) => ({
+        ...d,
+        seams: d.seams.map((s, k) => {
+          if (k !== i) return s
+          const bandI = Math.max(0, d.shots[i].height - d.top - d.bottom)
+          const bandNext = Math.max(0, d.shots[i + 1].height - d.top - d.bottom)
+          const overlap = Math.max(0, bandI - Math.min(s.advance, bandNext))
+          return { ...s, cut: Math.max(0, Math.min(Math.round(cut), overlap)), cutOverridden: true }
+        }),
+      }))
+      setSelectedSeam(i)
+    },
+    [history],
+  )
+  const resetSeamCut = useCallback(
+    (i: number) => {
+      history.commit((d) => ({
+        ...d,
+        seams: d.seams.map((s, k) => (k === i ? { ...s, cut: 0, cutOverridden: false } : s)),
+      }))
+    },
+    [history],
+  )
+
+  // 미리보기 호버 툴바에서의 재정렬(한 칸/맨 끝 이동)
+  const moveShot = useCallback(
+    (pos: number, to: 'up' | 'down' | 'top' | 'bottom') => {
+      const shots = history.ref.current.shots
+      if (shots.length < 2) return
+      const order = shots.map((_, i) => i)
+      const [m] = order.splice(pos, 1)
+      const dest =
+        to === 'top' ? 0 : to === 'bottom' ? order.length : to === 'up' ? Math.max(0, pos - 1) : Math.min(order.length, pos + 1)
+      if (dest === pos) return
+      order.splice(dest, 0, m)
+      onReorder(order)
+    },
+    [history, onReorder],
   )
 
   const toggle = useCallback(
@@ -373,6 +450,7 @@ export default function App() {
             onReorder={onReorder}
             onRemove={onRemove}
             onSortByName={onSortByName}
+            onDropFiles={addFiles}
             sortDir={sortDir}
             hoverShot={hoverShot}
             onHoverShot={setHoverShot}
@@ -409,15 +487,38 @@ export default function App() {
             <PreviewCanvas
               shots={doc.shots}
               layout={layout}
+              seams={doc.seams}
               selectedSeam={selectedSeam}
               onSelectSeam={(i) => {
                 setSelectedSeam(i)
-                setReviewOpen(true)
+                if (i != null) setReviewOpen(true)
               }}
               hoverShot={hoverShot}
               onHoverShot={setHoverShot}
+              reviewOpen={reviewOpen}
+              onSeamEditStart={onSeamEditStart}
+              onSeamEditEnd={onSeamEditEnd}
+              onSeamAdvance={setSeamAdvance}
+              onSeamCut={setSeamCut}
+              onMoveShot={moveShot}
+              onRemoveShot={onRemove}
             />
           </div>
+          {reviewOpen && selectedSeam != null && layout && doc.seams[selectedSeam] && (
+            <SeamInspector
+              shots={doc.shots}
+              layout={layout}
+              seamIndex={selectedSeam}
+              seam={doc.seams[selectedSeam]}
+              onSeamEditStart={onSeamEditStart}
+              onSeamEditEnd={onSeamEditEnd}
+              onSeamAdvance={setSeamAdvance}
+              onSeamCut={setSeamCut}
+              onResetAdvance={resetSeam}
+              onResetCut={resetSeamCut}
+              onClose={() => setSelectedSeam(null)}
+            />
+          )}
         </main>
 
         {/* 우측: 검수 패널 */}

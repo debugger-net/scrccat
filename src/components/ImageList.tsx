@@ -6,6 +6,7 @@ interface Props {
   onReorder: (newOrder: number[]) => void // newOrder[newPos] = 기존 표시위치
   onRemove: (i: number) => void
   onSortByName: () => void
+  onDropFiles: (files: File[], index: number) => void // 특정 위치에 파일 추가
   sortDir: 1 | -1 | 0
   hoverShot: number | null
   onHoverShot: (i: number | null) => void
@@ -21,11 +22,22 @@ interface DragState {
   targetPos: number
 }
 
+interface Pending {
+  pos: number
+  grabOffset: number
+  containerTop: number
+  slotPitch: number
+  startY: number
+}
+
+const DRAG_THRESH = 4 // 이 픽셀 이상 움직여야 드래그 시작(클릭·터치 스크롤과 구분)
+
 export default function ImageList({
   shots,
   onReorder,
   onRemove,
   onSortByName,
+  onDropFiles,
   sortDir,
   hoverShot,
   onHoverShot,
@@ -36,18 +48,35 @@ export default function ImageList({
   const [drag, setDrag] = useState<DragState | null>(null)
   const dragRef = useRef<DragState | null>(null)
   dragRef.current = drag
-  const dragging = drag != null
+  const pendingRef = useRef<Pending | null>(null)
+  const [interacting, setInteracting] = useState(false)
+  const [dropIndex, setDropIndex] = useState<number | null>(null) // 파일 드롭 삽입 위치
 
   useEffect(() => {
-    if (!dragging) return
+    if (!interacting) return
     const move = (e: PointerEvent) => {
       const d = dragRef.current
       const list = listRef.current
-      if (!d || !list) return
-      const containerTop = list.getBoundingClientRect().top // 스크롤에도 안전하게 매 이동 갱신
-      const relTop = e.clientY - d.grabOffset - containerTop
-      const targetPos = Math.max(0, Math.min(shots.length - 1, Math.round(relTop / d.slotPitch)))
-      setDrag({ ...d, pointerY: e.clientY, targetPos, containerTop })
+      if (d) {
+        if (!list) return
+        const containerTop = list.getBoundingClientRect().top
+        const relTop = e.clientY - d.grabOffset - containerTop
+        const targetPos = Math.max(0, Math.min(shots.length - 1, Math.round(relTop / d.slotPitch)))
+        setDrag({ ...d, pointerY: e.clientY, targetPos, containerTop })
+      } else {
+        const pend = pendingRef.current
+        if (!pend) return
+        if (Math.abs(e.clientY - pend.startY) > DRAG_THRESH) {
+          setDrag({
+            fromPos: pend.pos,
+            grabOffset: pend.grabOffset,
+            containerTop: pend.containerTop,
+            slotPitch: pend.slotPitch,
+            pointerY: e.clientY,
+            targetPos: pend.pos,
+          })
+        }
+      }
     }
     const up = () => {
       const d = dragRef.current
@@ -57,7 +86,9 @@ export default function ImageList({
         order.splice(d.targetPos, 0, moved)
         onReorder(order)
       }
+      pendingRef.current = null
       setDrag(null)
+      setInteracting(false)
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
@@ -67,36 +98,75 @@ export default function ImageList({
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
     }
-  }, [dragging, shots, onReorder])
+  }, [interacting, shots, onReorder])
 
-  const startDrag = (pos: number, e: React.PointerEvent) => {
+  // 바 전체에서 드래그 시작. 버튼(삭제·이동)은 제외. 터치는 그립으로만(리스트 스크롤 보존).
+  const onBarPointerDown = (pos: number, e: React.PointerEvent) => {
     if (disabled || shots.length < 2) return
-    e.preventDefault()
+    const target = e.target as HTMLElement
+    if (target.closest('button')) return
+    const onGrip = !!target.closest('[data-grip]')
+    if (e.pointerType === 'touch' && !onGrip) return
     const list = listRef.current
     const el = itemRefs.current[pos]
     if (!list || !el) return
-    try {
-      ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
-    } catch {
-      /* noop */
-    }
+    e.preventDefault()
     const rect = el.getBoundingClientRect()
-    const containerTop = list.getBoundingClientRect().top
-    // 슬롯 간격: 인접 두 아이템의 offsetTop 차이(없으면 자기 높이+간격)
     const a = itemRefs.current[0]
     const b = itemRefs.current[1]
     const slotPitch = a && b ? b.offsetTop - a.offsetTop : rect.height + 8
-    setDrag({
-      fromPos: pos,
+    pendingRef.current = {
+      pos,
       grabOffset: e.clientY - rect.top,
-      containerTop,
+      containerTop: list.getBoundingClientRect().top,
       slotPitch,
-      pointerY: e.clientY,
-      targetPos: pos,
-    })
+      startY: e.clientY,
+    }
+    setInteracting(true)
   }
 
+  // 한 칸/맨 끝 이동
+  const move = (pos: number, to: 'up' | 'down' | 'top' | 'bottom') => {
+    if (shots.length < 2) return
+    const order = shots.map((_, i) => i)
+    const [m] = order.splice(pos, 1)
+    const dest =
+      to === 'top' ? 0 : to === 'bottom' ? order.length : to === 'up' ? Math.max(0, pos - 1) : Math.min(order.length, pos + 1)
+    if (dest === pos) return
+    order.splice(dest, 0, m)
+    onReorder(order)
+  }
+
+  // 파일 드롭: 포인터 Y로 삽입 index 계산(아이템 중점 기준)
+  const computeDropIndex = (clientY: number): number => {
+    const refs = itemRefs.current
+    let idx = shots.length
+    for (let i = 0; i < shots.length; i++) {
+      const el = refs[i]
+      if (!el) continue
+      const r = el.getBoundingClientRect()
+      if (clientY < r.top + r.height / 2) {
+        idx = i
+        break
+      }
+    }
+    return idx
+  }
+
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes('Files')
+
   if (!shots.length) return null
+
+  const dropLineTop = (() => {
+    if (dropIndex == null) return null
+    const refs = itemRefs.current
+    if (dropIndex < shots.length) {
+      const el = refs[dropIndex]
+      return el ? el.offsetTop - 4 : null
+    }
+    const el = refs[shots.length - 1]
+    return el ? el.offsetTop + el.offsetHeight + 2 : null
+  })()
 
   return (
     <div className="flex min-h-0 flex-col">
@@ -111,7 +181,33 @@ export default function ImageList({
           파일명순 {sortDir === 1 ? '↓' : sortDir === -1 ? '↑' : '⇅'}
         </button>
       </div>
-      <ul ref={listRef} className="relative space-y-2">
+      <ul
+        ref={listRef}
+        className="relative space-y-2"
+        onDragOver={(e) => {
+          if (!hasFiles(e) || disabled) return
+          e.preventDefault()
+          setDropIndex(computeDropIndex(e.clientY))
+        }}
+        onDragLeave={(e) => {
+          // 리스트 바깥으로 나갈 때만 해제(자식 간 이동은 무시)
+          if (e.currentTarget.contains(e.relatedTarget as Node)) return
+          setDropIndex(null)
+        }}
+        onDrop={(e) => {
+          if (!hasFiles(e) || disabled) return
+          e.preventDefault()
+          const at = computeDropIndex(e.clientY)
+          setDropIndex(null)
+          const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'))
+          if (files.length) onDropFiles(files, at)
+        }}
+      >
+        {dropLineTop != null && (
+          <div className="pointer-events-none absolute left-0 z-10 h-0.5 w-full rounded bg-sky-400" style={{ top: dropLineTop }}>
+            <span className="absolute -top-2 left-1 rounded bg-sky-500 px-1 text-[9px] font-medium text-white">여기에 추가</span>
+          </div>
+        )}
         {shots.map((s, pos) => {
           const isDragged = drag?.fromPos === pos
           let translateY = 0
@@ -127,10 +223,12 @@ export default function ImageList({
             }
           }
           const highlighted = hoverShot === pos
+          const last = shots.length - 1
           return (
             <li
               key={s.id}
               ref={(el) => (itemRefs.current[pos] = el)}
+              onPointerDown={(e) => onBarPointerDown(pos, e)}
               onPointerEnter={() => !drag && onHoverShot(pos)}
               onPointerLeave={() => !drag && onHoverShot(null)}
               style={{
@@ -138,8 +236,11 @@ export default function ImageList({
                 transition,
                 zIndex: isDragged ? 50 : undefined,
                 position: 'relative',
+                touchAction: 'pan-y',
               }}
-              className={`flex items-center gap-2 rounded-md border bg-neutral-800/60 p-2 ${
+              className={`group flex select-none items-center gap-2 rounded-md border bg-neutral-800/60 p-2 ${
+                shots.length > 1 ? 'cursor-grab active:cursor-grabbing' : ''
+              } ${
                 isDragged
                   ? 'border-x-2 border-x-sky-400 border-y-neutral-600 shadow-xl shadow-black/50'
                   : highlighted
@@ -147,25 +248,32 @@ export default function ImageList({
                     : 'border-neutral-700'
               }`}
             >
-              {/* 드래그 핸들 (모바일에서도 잡기 쉬운 넓은 히트영역) */}
-              <button
-                className="shrink-0 cursor-grab touch-none select-none rounded px-0.5 text-neutral-500 hover:text-neutral-200 active:cursor-grabbing disabled:opacity-30"
-                style={{ touchAction: 'none' }}
-                onPointerDown={(e) => startDrag(pos, e)}
-                disabled={disabled || shots.length < 2}
+              {/* 드래그 핸들(터치 어포던스). 바 전체가 드래그 가능하지만 터치는 이 핸들로만. */}
+              <span
+                data-grip
+                className="shrink-0 touch-none select-none rounded px-0.5 text-neutral-500 group-hover:text-neutral-300"
                 title="드래그해서 순서 변경"
-                aria-label="드래그 핸들"
+                aria-hidden
               >
                 <GripIcon />
-              </button>
+              </span>
               <span className="w-4 shrink-0 text-center text-xs tabular-nums text-neutral-400">{pos + 1}</span>
               <Thumbnail shot={s} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs text-neutral-200" title={s.name}>
                   {s.name}
                 </div>
-                <div className="text-[11px] text-neutral-500">
-                  {s.width}×{s.height}
+                <div className="flex items-center gap-1 text-[11px] text-neutral-500">
+                  <span className="shrink-0">
+                    {s.width}×{s.height}
+                  </span>
+                  {/* 이동 버튼(호버/포커스 시 노출) */}
+                  <span className="ml-auto flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+                    <MoveBtn label="맨 위로" sym="⤒" onClick={() => move(pos, 'top')} disabled={disabled || pos === 0} />
+                    <MoveBtn label="한 칸 위로" sym="↑" onClick={() => move(pos, 'up')} disabled={disabled || pos === 0} />
+                    <MoveBtn label="한 칸 아래로" sym="↓" onClick={() => move(pos, 'down')} disabled={disabled || pos === last} />
+                    <MoveBtn label="맨 아래로" sym="⤓" onClick={() => move(pos, 'bottom')} disabled={disabled || pos === last} />
+                  </span>
                 </div>
               </div>
               <button
@@ -181,6 +289,21 @@ export default function ImageList({
         })}
       </ul>
     </div>
+  )
+}
+
+function MoveBtn({ label, sym, onClick, disabled }: { label: string; sym: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      className="flex h-4 w-4 items-center justify-center rounded text-[11px] leading-none text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100 disabled:opacity-25 disabled:hover:bg-transparent"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+    >
+      {sym}
+    </button>
   )
 }
 
@@ -206,5 +329,5 @@ function Thumbnail({ shot }: { shot: Shot }) {
     const ctx = c.getContext('2d')!
     ctx.drawImage(shot.bitmap, 0, 0, w, h)
   }, [shot])
-  return <canvas ref={ref} className="shrink-0 rounded border border-neutral-700" />
+  return <canvas ref={ref} className="pointer-events-none shrink-0 rounded border border-neutral-700" />
 }

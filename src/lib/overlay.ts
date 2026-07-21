@@ -1,4 +1,4 @@
-import type { Shot } from './types'
+import type { SigShot } from './types'
 import { SIG_W } from './signature'
 
 // 오버레이 마스크: 여러 장에서 "같은 뷰포트 좌표(y,x)의 셀이 거의 변하지 않는" 곳을 찾는다.
@@ -14,7 +14,7 @@ export interface OverlayInfo {
 }
 
 export function computeOverlay(
-  shots: Shot[],
+  shots: SigShot[],
   { matchStd = 0.03, composeStd = 0.05, dilX = 1, dilY = 3 } = {},
 ): OverlayInfo {
   const W = SIG_W

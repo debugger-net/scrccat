@@ -1,8 +1,8 @@
-import type { Shot } from './types'
+import type { SigShot } from './types'
 import { pairCostFast, minTrustOverlap } from './match'
 
 // 파일명 순 랭크(자연 정렬). 시작점/동률 판단의 약한 사전(prior)으로만 쓴다.
-export function filenameRank(shots: Shot[]): number[] {
+export function filenameRank(shots: SigShot[]): number[] {
   const idx = shots.map((_, i) => i)
   idx.sort((a, b) => shots[a].name.localeCompare(shots[b].name, undefined, { numeric: true }))
   const rank = new Array<number>(shots.length)
@@ -16,7 +16,7 @@ export function filenameRank(shots: Shot[]): number[] {
 // 최소비용 해밀턴 경로를 찾는다(작은 n은 Held-Karp 정확해, 큰 n은 그리디+2-opt).
 // 파일명 순은 강하게 의존하지 않는 약한 tie-break 사전으로만 더한다.
 export function orderShots(
-  shots: Shot[],
+  shots: SigShot[],
   mask: Uint8Array,
   top: number,
   bottom: number,

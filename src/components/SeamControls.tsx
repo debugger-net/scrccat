@@ -32,10 +32,17 @@ export default function SeamControls({ seams, selected, onSelect, onNudge, onRes
             <span className="text-neutral-300">
               이음새 {i + 1} <span className="text-neutral-500">({i + 1}→{i + 2})</span>
             </span>
-            <span
-              className={`inline-block h-2 w-2 rounded-full ${confColor(s.confidence)}`}
-              title={`신뢰도 ${(s.confidence * 100).toFixed(0)}%`}
-            />
+            <span className="flex items-center gap-1">
+              {s.cutOverridden && (
+                <span className="rounded bg-amber-500/20 px-1 text-[9px] text-amber-300" title={`자르는 선 ${s.cut}px 조정됨`}>
+                  ✂ {s.cut}
+                </span>
+              )}
+              <span
+                className={`inline-block h-2 w-2 rounded-full ${confColor(s.confidence)}`}
+                title={`신뢰도 ${(s.confidence * 100).toFixed(0)}%`}
+              />
+            </span>
           </div>
           <div className="flex items-center gap-1">
             <span className="text-neutral-500">추가 {s.advance}px</span>

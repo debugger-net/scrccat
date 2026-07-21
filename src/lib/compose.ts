@@ -29,6 +29,14 @@ export interface Placement {
   band: number // 스크롤 밴드 높이
 }
 
+// 각 이음새의 오버랩 구간과 자르는 선 위치(출력 좌표) — 검수 UI의 핸들·밴드 렌더용.
+export interface OverlapInfo {
+  i: number // 이음새 인덱스 (shot i ↔ i+1)
+  topY: number // 오버랩 상단 = B(아래 이미지) 시작 = advance 핸들
+  cutY: number // A→B 전환(자르는 선) = cut 핸들
+  botY: number // 오버랩 하단 = A(위 이미지) 밴드 끝
+}
+
 export interface Layout {
   width: number
   height: number
@@ -39,6 +47,7 @@ export interface Layout {
   contentTop: number // = headerH (콘텐츠 시작 출력 y)
   totalContent: number
   placements: Placement[]
+  overlaps: OverlapInfo[]
   top: number
   bottom: number
 }
@@ -61,6 +70,19 @@ export function computeLayout(shots: Shot[], opts: ComposeOptions): Layout {
   let totalContent = 0
   for (let i = 0; i < n; i++) totalContent = Math.max(totalContent, C[i] + band[i])
 
+  // 이음새별 전이 content-y T[i] (A→B 전환). cut=0이면 A 밴드 하단(기본).
+  // 오버랩 [C[i+1], C[i]+band[i]] 안으로 clamp하므로 소스 행은 항상 유효하다.
+  const T: number[] = new Array(Math.max(0, n - 1))
+  for (let i = 0; i < n - 1; i++) {
+    const aBot = C[i] + band[i] // 오버랩 하단
+    const bTop = C[i + 1] // 오버랩 상단
+    const cut = Math.max(0, seams[i]?.cut ?? 0)
+    let t = aBot - cut
+    if (t < bTop) t = bTop
+    if (t > aBot) t = aBot
+    T[i] = t
+  }
+
   const headerH = includeHeader && top > 0 ? top : 0
   const footerH = includeFooter && bottom > 0 ? bottom : 0
   const height = headerH + totalContent + footerH
@@ -69,14 +91,17 @@ export function computeLayout(shots: Shot[], opts: ComposeOptions): Layout {
   if (headerH > 0) pieces.push({ shotIndex: 0, sx: 0, sy: 0, sw: width, sh: headerH, dy: 0 })
 
   if (cleanOverlays && opts.composeMask && n > 1) {
-    pieces.push(...composeMultiSource(shots, C, band, top, width, headerH, totalContent, opts.composeMask, opts.maskH ?? 0))
+    // cut 수동 조정이 있으면 그 이음새 오버랩에서 컬럼 선택을 제약(위=A쪽, 아래=B쪽).
+    const cuts = buildCutConstraints(n, C, band, T, totalContent, seams)
+    pieces.push(...composeMultiSource(shots, C, band, top, width, headerH, totalContent, opts.composeMask, opts.maskH ?? 0, cuts))
   } else {
-    // 단순 스트립: 각 장의 새 구간만 이어붙임(정본 = 가장 이른 장).
+    // 스트립: 각 장은 [이전 전이, 자기 하단 전이) 구간을 채운다(전이=cut 반영, 갭 없음).
     let filled = 0
     for (let i = 0; i < n; i++) {
-      const cEnd = C[i] + band[i]
+      const lower = i < n - 1 ? T[i] : totalContent
+      const cEnd = Math.min(lower, C[i] + band[i])
       if (cEnd <= filled) continue
-      const cStart = filled
+      const cStart = filled // 연속 채움 — cStart는 항상 C[i] 이상이라 소스 유효
       const sy = top + (cStart - C[i])
       pieces.push({ shotIndex: i, sx: 0, sy, sw: width, sh: cEnd - cStart, dy: headerH + cStart })
       filled = cEnd
@@ -88,12 +113,43 @@ export function computeLayout(shots: Shot[], opts: ComposeOptions): Layout {
     pieces.push({ shotIndex: n - 1, sx: 0, sy: last.height - bottom, sw: width, sh: footerH, dy: headerH + totalContent })
   }
 
+  const clampC = (y: number) => headerH + Math.max(0, Math.min(totalContent, y))
   const seamYs: number[] = []
-  for (let i = 0; i < n - 1; i++) seamYs.push(headerH + Math.min(totalContent, C[i] + band[i]))
+  const overlaps: OverlapInfo[] = []
+  for (let i = 0; i < n - 1; i++) {
+    seamYs.push(clampC(T[i]))
+    overlaps.push({ i, topY: clampC(C[i + 1]), cutY: clampC(T[i]), botY: clampC(C[i] + band[i]) })
+  }
 
   const placements: Placement[] = shots.map((_, i) => ({ shotIndex: i, cStart: C[i], band: band[i] }))
 
-  return { width, height, pieces, seamYs, headerH, footerH, contentTop: headerH, totalContent, placements, top, bottom }
+  return { width, height, pieces, seamYs, headerH, footerH, contentTop: headerH, totalContent, placements, overlaps, top, bottom }
+}
+
+// cut 수동 조정된 이음새마다, 오버랩 구간의 각 content 행이 쓸 수 있는 소스 장 index 범위를 좁힌다.
+// 자르는 선 위쪽은 A(≤i), 아래쪽은 B(≥i+1). 조정된 이음새가 없으면 null(제약 없음).
+function buildCutConstraints(
+  n: number,
+  C: number[],
+  band: number[],
+  T: number[],
+  totalContent: number,
+  seams: Seam[],
+): { lo: Int32Array; hi: Int32Array } | null {
+  let any = false
+  for (let i = 0; i < n - 1; i++) if (seams[i]?.cutOverridden) any = true
+  if (!any) return null
+  const lo = new Int32Array(totalContent) // 기본 0
+  const hi = new Int32Array(totalContent).fill(n - 1)
+  for (let i = 0; i < n - 1; i++) {
+    if (!seams[i]?.cutOverridden) continue
+    const aBot = Math.min(totalContent, C[i] + band[i])
+    const bTop = Math.max(0, Math.min(totalContent, C[i + 1]))
+    const t = Math.max(0, Math.min(totalContent, T[i]))
+    for (let p = bTop; p < t; p++) if (i < hi[p]) hi[p] = i // 자르는 선 위 → 장 ≤ i
+    for (let p = t; p < aBot; p++) if (i + 1 > lo[p]) lo[p] = i + 1 // 자르는 선 아래 → 장 ≥ i+1
+  }
+  return { lo, hi }
 }
 
 // 열(column)마다 콘텐츠를 따라 내려가며, 오버레이(플로팅 UI)에 걸리지 않는 가장 중앙에 가까운
@@ -108,9 +164,11 @@ function composeMultiSource(
   totalContent: number,
   composeMask: Uint8Array,
   maskH: number,
+  cuts: { lo: Int32Array; hi: Int32Array } | null,
 ): Piece[] {
   const n = shots.length
   const W = SIG_W
+  const CUT_PEN = 1e4 // cut 제약 위반 벌점: 중앙성(≤~1e3)보다 크고 마스킹(1e6)보다 작다
   const colX0: number[] = []
   const colX1: number[] = []
   for (let c = 0; c < W; c++) {
@@ -130,12 +188,16 @@ function composeMultiSource(
     pieces.push({ shotIndex: rs, sx: colX0[c], sy, sw: colX1[c] - colX0[c], sh: endP - runStart[c], dy: headerH + runStart[c] })
   }
 
+  const loP = cuts?.lo
+  const hiP = cuts?.hi
   const covering: number[] = []
   for (let p = 0; p < totalContent; p++) {
     // 이 콘텐츠 행을 덮는 후보 장(행마다 한 번만 계산)
     covering.length = 0
     for (let i = 0; i < n; i++) if (C[i] <= p && p < C[i] + band[i]) covering.push(i)
     if (covering.length === 0) continue
+    const lo = loP ? loP[p] : 0
+    const hi = hiP ? hiP[p] : n - 1
     for (let c = 0; c < W; c++) {
       let chosen = runShot[c]
       let chosenScore = Infinity
@@ -143,7 +205,8 @@ function composeMultiSource(
         const vy = top + (p - C[chosen])
         const masked = vy >= 0 && vy < maskH && composeMask[vy * W + c] === 1
         const k = p - C[chosen]
-        chosenScore = (masked ? 1e6 : 0) - Math.min(k, band[chosen] - k)
+        const cutPen = chosen < lo || chosen > hi ? CUT_PEN : 0
+        chosenScore = (masked ? 1e6 : 0) + cutPen - Math.min(k, band[chosen] - k)
       } else {
         chosen = -1
       }
@@ -151,7 +214,8 @@ function composeMultiSource(
         const vy = top + (p - C[i])
         const masked = vy >= 0 && vy < maskH && composeMask[vy * W + c] === 1
         const k = p - C[i]
-        const s = (masked ? 1e6 : 0) - Math.min(k, band[i] - k)
+        const cutPen = i < lo || i > hi ? CUT_PEN : 0
+        const s = (masked ? 1e6 : 0) + cutPen - Math.min(k, band[i] - k)
         if (s < chosenScore - (i === runShot[c] ? 0 : HYS)) {
           chosenScore = s
           chosen = i

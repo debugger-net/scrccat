@@ -1,4 +1,4 @@
-import type { Shot, Seam } from './types'
+import type { SigShot, Seam } from './types'
 import { matchPair, minTrustOverlap } from './match'
 
 function clamp01(x: number): number {
@@ -7,8 +7,8 @@ function clamp01(x: number): number {
 
 // A(위), B(아래)의 최적 겹침(스크롤 전진량 s)을 오버레이 마스크를 제외하고 찾는다.
 export function detectSeam(
-  a: Shot,
-  b: Shot,
+  a: SigShot,
+  b: SigShot,
   mask: Uint8Array,
   top: number,
   bottom: number,
@@ -18,18 +18,21 @@ export function detectSeam(
   const m = matchPair(a, b, mask, top, bottom, minTrust)
   if (m.overlap <= 0) {
     const s = Math.max(0, Math.floor(len / 2))
-    return { advance: s, auto: s, cost: 1, confidence: 0, overridden: false }
+    return { advance: s, auto: s, cost: 1, confidence: 0, overridden: false, cut: 0, cutOverridden: false }
   }
-  // 신뢰도: 절대 비용이 낮을수록, 유효 셀이 많을수록 높다.
+  // 신뢰도: 절대 비용이 낮을수록, 유효 셀이 많을수록, 최소가 뚜렷할수록(margin) 높다.
+  // margin은 반복 콘텐츠(리더보드 등)에서 여러 정렬이 비슷하게 맞는 "애매한" 이음새를 낮게 잡아
+  // 검수를 유도한다.
   const absolute = clamp01(1 - m.cost / 0.12)
   const coverage = clamp01(m.cover / 400)
-  const confidence = clamp01(absolute * 0.7 + coverage * 0.3)
-  return { advance: m.advance, auto: m.advance, cost: m.cost, confidence, overridden: false }
+  const distinct = clamp01(m.margin / 0.5)
+  const confidence = clamp01(absolute * 0.5 + coverage * 0.2 + distinct * 0.3)
+  return { advance: m.advance, auto: m.advance, cost: m.cost, confidence, overridden: false, cut: 0, cutOverridden: false }
 }
 
 // 인접 쌍마다 이음새 계산. prev가 있으면 수동 조정(overridden)은 인덱스 기준으로 보존.
 export function detectAllSeams(
-  shots: Shot[],
+  shots: SigShot[],
   mask: Uint8Array,
   top: number,
   bottom: number,
@@ -39,15 +42,14 @@ export function detectAllSeams(
   for (let i = 0; i < shots.length - 1; i++) {
     const auto = detectSeam(shots[i], shots[i + 1], mask, top, bottom)
     const p = prev?.[i]
-    if (p?.overridden) {
-      out.push({
-        ...auto,
-        advance: clampAdvance(p.advance, shots[i + 1], top, bottom),
-        overridden: true,
-      })
-    } else {
-      out.push(auto)
-    }
+    // advance·cut 수동 조정은 각각 독립적으로 보존한다.
+    out.push({
+      ...auto,
+      advance: p?.overridden ? clampAdvance(p.advance, shots[i + 1], top, bottom) : auto.advance,
+      overridden: p?.overridden ?? false,
+      cut: p?.cutOverridden ? p.cut : auto.cut,
+      cutOverridden: p?.cutOverridden ?? false,
+    })
   }
   return out
 }
@@ -55,8 +57,8 @@ export function detectAllSeams(
 // 수동 재정렬용: 이전과 "같은 인접쌍(아이디 기준)"의 이음새는 그대로 재사용하고(수동조정 포함),
 // 바뀐 경계만 새로 감지한다. 이음새는 위치와 무관하게 두 이미지쌍에만 의존하므로 안전하다.
 export function reconcileSeams(
-  newShots: Shot[],
-  oldShots: Shot[],
+  newShots: SigShot[],
+  oldShots: SigShot[],
   oldSeams: Seam[],
   mask: Uint8Array,
   top: number,
@@ -74,7 +76,7 @@ export function reconcileSeams(
   return out
 }
 
-export function clampAdvance(s: number, lower: Shot, top: number, bottom: number): number {
+export function clampAdvance(s: number, lower: SigShot, top: number, bottom: number): number {
   const len = lower.height - bottom - top
   return Math.max(0, Math.min(s, len))
 }

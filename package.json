@@ -1,7 +1,7 @@
 {
   "name": "scrccat",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "스크롤하며 찍은 모바일 스크린샷들을 브라우저 안에서 한 장으로 이어붙이는 유틸리티",
   "scripts": {
